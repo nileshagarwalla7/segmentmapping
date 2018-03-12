@@ -53,7 +53,7 @@ if((ISTdate > PSTdate) and (dt.now(pytz.timezone('US/Pacific')).hour > 20)):
     date_final = ISTLaunchDate
 else:
     date_final = PSTLaunchDate
-#date_final='2018-02-08'
+date_final='2018-02-08'
 LogID = 0
 #log_df = pd.DataFrame()
 properties = {"user" : "occuser" , "password":"Exp3dia22" , "driver":"com.microsoft.sqlserver.jdbc.SQLServerDriver"}
@@ -97,9 +97,8 @@ try:
     #locale_name='en_us'
     #data_environ='prod'
     
-    pos = locale_name.split('_')[-1].upper()
+    pos = locale_name.split('_')[1].upper()
     current_date =  time.strftime("%Y/%m/%d")
-    Year,Month,Date=current_date.split('/',2) ### Added for ETL Loyalty feed
     
     if data_environ == 'prod':
         url = "jdbc:sqlserver://10.23.18.135"
@@ -111,7 +110,10 @@ try:
     #current_date =  '2018/01/28'
     
     status_table = (sqlContext.read.format("jdbc").option("url", url).option("driver","com.microsoft.sqlserver.jdbc.SQLServerDriver").option("dbtable", "Orchestration.dbo.AlphaConfig").option("user", "occuser").option("password", "Exp3dia22").load())
-    required_row = status_table.filter(status_table.Locale == locale_name).filter("brand like 'Brand Expedia'").collect()
+    pos1 = locale_name.split('_')[1].upper()
+    pos0 = locale_name.split('_')[0]
+    search_string = pos0+"_"+pos1
+    required_row = status_table.filter(status_table.Locale == search_string).filter("brand like 'Brand Expedia'").collect()
     global process_id
     global process_name 
     process_id = required_row[0]['id']
@@ -166,10 +168,31 @@ def make_ls (row):
         
         final_ls = [[tpid,eapid,locale_name,email_id,test_key,i,row["segment_type_id"]] for i in seg_ls]
         return final_ls
+
 #marketing seg mapping begins
+
+central_log_table = importSQLTable("Orchestration","CentralLog")
+etl_config_table = importSQLTable("Orchestration","ETLconfig")
+
+etl_config_table = etl_config_table.withColumnRenamed("ScheduleTimes ","ScheduleTimes")
+etl_config_table = etl_config_table.withColumnRenamed("Job_Name ","Job_Name")
+etl_config_table = etl_config_table.withColumnRenamed("ID ","ID")
+filter_condition_etl_config = "Locale = " + "'" + locale_name + "'"
+
+traveler_source_lookup_row = etl_config_table.filter(filter_condition_etl_config).filter(etl_config_table.IsFinal == 1).filter("Job_Name not like ' '").orderBy(desc('ScheduleTimes')).collect()
+central_log_status_id = traveler_source_lookup_row[0]["ID"]
+clt1 = central_log_table.filter(central_log_table.SourceID == central_log_status_id).filter(central_log_table.IsComplete == 1).filter(central_log_table.SourceName == "ETL").orderBy(desc('StartDate'))
+detailed_log_list = clt1.collect()[0] 
+log_id = detailed_log_list['LogID']
+
+File_path = detailed_log_list['FilePath']
+print("TP data path from central log:",File_path)
+
+
+
     
 try:
-    TPG_data = ("s3n://big-data-analytics-scratch-prod/project_traveler_profile/affine/email_campaign/merged_shop_phase_date_format/{}/{}/{}".format(pos,locale_name,current_date))
+    TPG_data = (File_path.format(pos,locale_name,current_date))
     df = (sqlContext.read.parquet(TPG_data).filter("mer_status = 1"))
     log_df = log_df_update(sqlContext,process_name, 1,'traveler data imported',get_pst_date(),' ',str(df.count()),StartDate,TPG_data,'Orchestration.dbo.AlphaProcessDetailsLog')
 except:
@@ -183,21 +206,19 @@ eapid = first_row_df["eapid"]
 
 
 tableName = ['module_variable_definition']
-tableName_view = ['vwCampaignDefinition','vwTemplateDefinition','vwSegmentDefinition', 'vwSegmentModule','vwModuleDefinition']
+tableName_view = ['vwCampaignDefinition','vwTemplateDefinition','vwSegmentDefinition','vwSegmentModule','vwModuleDefinition']
 for name in tableName:
     data_framename = 'df'+(''.join([i.title() for i in name.split('.')[0].split('_')]))
     globals()[data_framename] = (importSQLTable("AlphaMVP","{}_{}".format(name,data_environ))).drop("id")
 for name in tableName_view:
     data_framename = 'df'+(''.join([i for i in name.replace('vw','')]))
     globals()[data_framename] = (importSQLTable("Alpha{}".format(data_environ.title()),name)).drop("id")
-
-###supertrip segments to be filtered out    
-list_segments=dfSegmentDefinition.filter("segment_criteria like '%_st %'").select("segment_type_id").distinct().rdd.flatMap(lambda x:x).collect()   
+    
 StartDate = get_pst_date()
 LogID+=1
 
 try:
-    seg_info_ls = (dfSegmentDefinition .drop("id").filter("tpid = " + str(tpid) + " and eapid = " + str(eapid)).filter("segment_deleted_flag = 0").filter(col("segment_type_id").isin(list_segments)==False).select("segment_type_id","segment_criteria").collect())
+    seg_info_ls = (dfSegmentDefinition .drop("id").filter("tpid = " + str(tpid) + " and eapid = " + str(eapid)).filter("segment_deleted_flag = 0").select("segment_type_id","segment_criteria").collect())
     log_df = log_df_update(sqlContext, process_name,1,'segment defintition imported',get_pst_date(),' ',0,StartDate,' ','Orchestration.dbo.AlphaProcessDetailsLog')
 except:
     log_df = log_df_update(sqlContext, process_name,0,'failed',get_pst_date(),'Problem in importing segment_definition_prod file.',0,StartDate,' ','Orchestration.dbo.AlphaProcessDetailsLog')
@@ -303,7 +324,7 @@ dfCampaignDefinitionLoyalty=dfCampaignDefinition.filter("tpid = " + str(tpid) + 
 if(dfCampaignDefinitionLoyalty.count()!=0):
     try:
 
-        TPG_data="s3://big-data-analytics-scratch-prod/project_traveler_profile/affine/email_campaign_test_with_status_pos_wise/ETL/Data/CER_MER_1/{}/{}/{}".format(Year,Month,locale_name) ###Modified ETL loyalty path
+        TPG_data="s3://big-data-analytics-scratch-prod/project_traveler_profile/affine/email_campaign_test/ETL/Data/CER_MER"
         df = (sqlContext.read.parquet(TPG_data))
         log_df = log_df_update(sqlContext, process_name_loyalty,1,'traveler data imported',get_pst_date(),' ',str(df.count()),StartDate,TPG_data,'Orchestration.dbo.AlphaProcessDetailsLog')
     except:
@@ -413,4 +434,4 @@ if(dfCampaignDefinitionLoyalty.count()!=0):
 else:
     segment_path = ("s3n://big-data-analytics-scratch-prod/project_traveler_profile/affine/email_campaign/segmentLookUpLoyalty/{}/{}/{}/{}".format(pos,locale_name,data_environ,ISTLaunchDate))
     log_df = log_df_update(sqlContext,process_name_loyalty,1,'Segment Mapping process completed.',get_pst_date(),' ','0',segmentMappingStartDate,segment_path,'Orchestration.dbo.AlphaProcessDetailsLog')
-    log_df = log_df_update(sqlContext,process_name_loyalty,1,'Segment Mapping process completed.',get_pst_date(),' ','0',segmentMappingStartDate,segment_path,'Orchestration.dbo.CentralLog')       
+    log_df = log_df_update(sqlContext,process_name_loyalty,1,'Segment Mapping process completed.',get_pst_date(),' ','0',segmentMappingStartDate,segment_path,'Orchestration.dbo.CentralLog')
